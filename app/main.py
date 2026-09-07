@@ -1,5 +1,8 @@
 import asyncio
 
+store = {}
+NULL_BULK = b"$-1\r\n"
+
 def RESP_parse_one(buf: bytes) -> tuple[list[str] | None, int]:
     """Extract one complete command from buf.
 
@@ -72,6 +75,19 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                             writer.write(RESP_error("wrong number of arguments for 'echo' command"))
                         else:
                             writer.write(RESP_bulk_string(args[0]))
+                    case 'SET':
+                        if len(args) < 2:
+                            writer.write(RESP_error("wrong number of arguments for 'set' command"))
+                        else:
+                            store[args[0]] = args[1]
+                            writer.write(b"+OK\r\n")
+                    case 'GET':
+                        if len(args) != 1:
+                            writer.write(RESP_error("wrong number of arguments for 'get' command"))
+                        elif args[0] in store:
+                            writer.write(RESP_bulk_string(store[args[0]]))
+                        else:
+                            writer.write(NULL_BULK)
                     case _:
                         writer.write(RESP_error(f"unknown command '{tokens[0]}'"))
 
