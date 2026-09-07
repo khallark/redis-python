@@ -1,7 +1,19 @@
 import asyncio
+import time
 
-store = {}
+store: dict[str, str] = {}
+expires: dict[str, int] = {}
 NULL_BULK = b"$-1\r\n"
+
+def now_ms() -> int:
+    return int(time.time() * 1000)
+
+def lookup(key: str):
+    """Return the live value for key, deleting it first if it has expired."""
+    if key in expires and now_ms() >= expires[key]:
+        store.pop(key, None)
+        expires.pop(key, None)
+    return store.get(key)
 
 def RESP_parse_one(buf: bytes) -> tuple[list[str] | None, int]:
     """Extract one complete command from buf.
@@ -79,15 +91,49 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                         if len(args) < 2:
                             writer.write(RESP_error("wrong number of arguments for 'set' command"))
                         else:
-                            store[args[0]] = args[1]
-                            writer.write(b"+OK\r\n")
+                            key, value = args[0], args[1]
+                            deadline = None
+                            bad = None
+                            i = 2
+                            while i < len(args):
+                                opt = args[i].upper()
+                                if opt in ['EX', 'PX', 'EXAT', 'PXAT']:
+                                    if i + 1 >= len(args):
+                                        bad = "syntax error"
+                                        break
+                                    try:
+                                        n = int(args[i + 1])
+                                    except ValueError:
+                                        bad = "value is not an integer or out of range"
+                                        break
+                                    deadline = {
+                                        'EX':   now_ms() + n * 1000,
+                                        'PX':   now_ms() + n,
+                                        'EXAT': n * 1000,
+                                        'PXAT': n,
+                                    }[opt]
+                                    i += 2
+                                else:
+                                    bad = "syntax error"
+                                    break
+                            
+                            if bad:
+                                writer.write(RESP_error(bad))
+                            else:
+                                store[key] = value
+                                expires.pop(key, None)
+                                if deadline is not None:
+                                    expires[key] = deadline
+                                writer.write(b"+OK\r\n")
                     case 'GET':
                         if len(args) != 1:
                             writer.write(RESP_error("wrong number of arguments for 'get' command"))
-                        elif args[0] in store:
-                            writer.write(RESP_bulk_string(store[args[0]]))
                         else:
-                            writer.write(NULL_BULK)
+                            value = lookup(args[0])
+                            if value is not None:
+                                writer.write(RESP_bulk_string(value))
+                            else:
+                                writer.write(NULL_BULK)
                     case _:
                         writer.write(RESP_error(f"unknown command '{tokens[0]}'"))
 
