@@ -1,7 +1,7 @@
 import asyncio
 import time
 
-store: dict[str, str] = {}
+store: dict[str, object] = {}
 expires: dict[str, int] = {}
 NULL_BULK = b"$-1\r\n"
 
@@ -51,8 +51,14 @@ def RESP_parse_one(buf: bytes) -> tuple[list[str] | None, int]:
 def RESP_bulk_string(string: str) -> bytes:
     return f"${len(string)}\r\n{string}\r\n".encode('utf-8')
 
+def RESP_integer(n: int) -> bytes:
+    return f":{n}\r\n".encode('utf-8')
+
 def RESP_error(message: str) -> bytes:
     return f"-ERR {message}\r\n".encode('utf-8')
+
+def RESP_list_error(message: str) -> bytes:
+    return f"-WRONGTYPE {message}\r\n".encode('utf-8')
     
 async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
     # Get the unique port of the connecting client
@@ -134,6 +140,20 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                                 writer.write(RESP_bulk_string(value))
                             else:
                                 writer.write(NULL_BULK)
+                    case 'RPUSH':
+                        if len(args) < 2:
+                            writer.write(RESP_error("wrong number of arguments for 'rpush' command"))
+                        else:
+                            key, values = args[0], args[1:]
+                            current = lookup(key)
+                            if current is not None and not isinstance(current, list):
+                                writer.write(RESP_list_error("Operation against a key holding the wrong kind of value"))
+                            else:
+                                if current is None:
+                                    current = []
+                                    store[key] = current
+                                current.extend(values)
+                                writer.write(RESP_integer(len(current)))
                     case _:
                         writer.write(RESP_error(f"unknown command '{tokens[0]}'"))
 

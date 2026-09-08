@@ -41,6 +41,10 @@ def bulk(s: str) -> bytes:
     return f"${len(s)}\r\n{s}\r\n".encode()
 
 
+def integer(n: int) -> bytes:
+    return f":{n}\r\n".encode()
+
+
 OK = b"+OK\r\n"
 PONG = b"+PONG\r\n"
 NULL = b"$-1\r\n"
