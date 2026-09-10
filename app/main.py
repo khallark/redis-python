@@ -15,6 +15,24 @@ def lookup(key: str):
         expires.pop(key, None)
     return store.get(key)
 
+def RESP_bulk_string(string: str) -> bytes:
+    return f"${len(string)}\r\n{string}\r\n".encode('utf-8')
+
+def RESP_integer(n: int) -> bytes:
+    return f":{n}\r\n".encode('utf-8')
+
+def RESP_array(items: list[str]) -> bytes:
+    out = [f"*{len(items)}\r\n".encode('utf-8')]
+    for item in items:
+        out.append(RESP_bulk_string(item))
+    return b"".join(out)
+
+def RESP_error(message: str) -> bytes:
+    return f"-ERR {message}\r\n".encode('utf-8')
+
+def RESP_list_error(message: str) -> bytes:
+    return f"-WRONGTYPE {message}\r\n".encode('utf-8')
+
 def RESP_parse_one(buf: bytes) -> tuple[list[str] | None, int]:
     """Extract one complete command from buf.
 
@@ -26,39 +44,27 @@ def RESP_parse_one(buf: bytes) -> tuple[list[str] | None, int]:
     if not buf.startswith(b'*'):
         raise ValueError(f"expected an array, got {buf[:1]!r}")
 
-    end = buf.find(b'\r\n')
-    if end == -1:
+    stop = buf.find(b'\r\n')
+    if stop == -1:
         return None, 0
-    count = int(buf[1:end])
+    count = int(buf[1:stop])
 
-    pos = end + 2
+    pos = stop + 2
     tokens = []
     for _ in range(count):
         if buf[pos:pos + 1] != b'$':
             return None, 0
-        end = buf.find(b'\r\n', pos)
-        if end == -1:
+        stop = buf.find(b'\r\n', pos)
+        if stop == -1:
             return None, 0
-        length = int(buf[pos + 1:end])
-        start = end + 2
+        length = int(buf[pos + 1:stop])
+        start = stop + 2
         if len(buf) < start + length + 2:
             return None, 0
         tokens.append(buf[start:start + length].decode('utf-8'))
         pos = start + length + 2
 
     return tokens, pos
-
-def RESP_bulk_string(string: str) -> bytes:
-    return f"${len(string)}\r\n{string}\r\n".encode('utf-8')
-
-def RESP_integer(n: int) -> bytes:
-    return f":{n}\r\n".encode('utf-8')
-
-def RESP_error(message: str) -> bytes:
-    return f"-ERR {message}\r\n".encode('utf-8')
-
-def RESP_list_error(message: str) -> bytes:
-    return f"-WRONGTYPE {message}\r\n".encode('utf-8')
     
 async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
     # Get the unique port of the connecting client
@@ -154,6 +160,33 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                                     store[key] = current
                                 current.extend(values)
                                 writer.write(RESP_integer(len(current)))
+                    case 'LRANGE':
+                        if len(args) != 3:
+                            writer.write(RESP_error("wrong number of arguments for 'lrange' command"))
+                        else:
+                            key = args[0]
+                            try:
+                                start = int(args[1])
+                                stop = int(args[2])
+                            except ValueError:
+                                writer.write(RESP_error("value is not an integer or out of range"))
+                            else:
+                                current = lookup(key)
+                                if current is not None and not isinstance(current, list):
+                                    writer.write(RESP_list_error("Operation against a key holding the wrong kind of value"))
+                                else:
+                                    if current is None:
+                                        current = []
+                                    n = len(current)
+                                    if start < 0:
+                                        start = max(n + start, 0)
+                                    if stop < 0:
+                                        stop = n + stop
+                                    stop = min(stop, n - 1)
+                                    if start > stop:
+                                        writer.write(RESP_array([]))
+                                    else:
+                                        writer.write(RESP_array(current[ start : stop + 1 ]))
                     case _:
                         writer.write(RESP_error(f"unknown command '{tokens[0]}'"))
 

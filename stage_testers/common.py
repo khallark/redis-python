@@ -41,6 +41,14 @@ def bulk(s: str) -> bytes:
     return f"${len(s)}\r\n{s}\r\n".encode()
 
 
+def resp_array(*items: str) -> bytes:
+    """Encode an array reply of bulk strings. No args -> the empty array."""
+    out = [f"*{len(items)}\r\n".encode()]
+    for item in items:
+        out.append(bulk(item))
+    return b"".join(out)
+
+
 def integer(n: int) -> bytes:
     return f":{n}\r\n".encode()
 
