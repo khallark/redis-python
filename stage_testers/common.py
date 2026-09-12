@@ -56,6 +56,7 @@ def integer(n: int) -> bytes:
 OK = b"+OK\r\n"
 PONG = b"+PONG\r\n"
 NULL = b"$-1\r\n"
+NULL_ARRAY = b"*-1\r\n"
 
 
 # ---------------------------------------------------------------- decoding

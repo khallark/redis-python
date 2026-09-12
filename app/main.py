@@ -4,6 +4,7 @@ import time
 store: dict[str, object] = {}
 expires: dict[str, int] = {}
 NULL_BULK = b"$-1\r\n"
+NULL_ARRAY = b"*-1\r\n"
 
 def now_ms() -> int:
     return int(time.time() * 1000)
@@ -160,6 +161,69 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                                     store[key] = current
                                 current.extend(values)
                                 writer.write(RESP_integer(len(current)))
+                    case 'LPUSH':
+                        if len(args) < 2:
+                            writer.write(RESP_error("wrong number of arguments for 'lpush' command"))
+                        else:
+                            key, values = args[0], args[1:]
+                            current = lookup(key)
+                            if current is not None and not isinstance(current, list):
+                                writer.write(RESP_list_error("Operation against a key holding the wrong kind of value"))
+                            else:
+                                if current is None:
+                                    current = []
+                                    store[key] = current
+                                values.reverse()
+                                current[0:0] = values
+                                writer.write(RESP_integer(len(current)))
+                    case 'LLEN':
+                        if len(args) != 1:
+                            writer.write(RESP_error("wrong number of arguments for 'llen' command"))
+                        else:
+                            current = lookup(args[0])
+                            if current is None:
+                                writer.write(RESP_integer(0))
+                            elif not isinstance(current, list):
+                                writer.write(RESP_list_error("Operation against a key holding the wrong kind of value"))
+                            else:
+                                writer.write(RESP_integer(len(current)))
+                    case 'LPOP':
+                        if len(args) < 1 or len(args) > 2:
+                            writer.write(RESP_error("wrong number of arguments for 'lpop' command"))
+                        else:
+                            key = args[0]
+                            count = None
+                            bad = None
+                            
+                            if len(args) == 2:
+                                try:
+                                    count = int(args[1])
+                                except ValueError:
+                                    bad = "value is not an integer or out of range"
+                                else:
+                                    if count < 0:
+                                        bad = "value is out of range, must be positive"
+                            if bad:
+                                writer.write(RESP_error(bad))
+                            else:
+                                current = lookup(key)
+                                if current is not None and not isinstance(current, list):
+                                    writer.write(RESP_list_error("Operation against a key holding the wrong kind of value"))
+                                elif current is None:
+                                    writer.write(NULL_ARRAY if count is not None else NULL_BULK)
+                                elif count is None:
+                                    popped = current.pop(0)
+                                    if not current:
+                                        store.pop(key, None)
+                                        expires.pop(key, None)
+                                    writer.write(RESP_bulk_string(popped))
+                                else:
+                                    popped = current[:count]
+                                    del current[:count]
+                                    if not current:
+                                        store.pop(key, None)
+                                        expires.pop(key, None)
+                                    writer.write(RESP_array(popped))
                     case 'LRANGE':
                         if len(args) != 3:
                             writer.write(RESP_error("wrong number of arguments for 'lrange' command"))
