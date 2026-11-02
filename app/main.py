@@ -1,8 +1,10 @@
 import asyncio
 import time
+from collections import deque
 
 store: dict[str, object] = {}
 expires: dict[str, int] = {}
+waiters: dict[str, deque[asyncio.Future]] = {}
 NULL_BULK = b"$-1\r\n"
 NULL_ARRAY = b"*-1\r\n"
 
@@ -15,6 +17,21 @@ def lookup(key: str):
         store.pop(key, None)
         expires.pop(key, None)
     return store.get(key)
+
+def serve_waiters(key: str) -> None:
+    """Hand elements from key's list to blocked BLPOP clients, oldest first."""
+    queue = waiters.get(key)
+    current = store.get(key)
+    while queue and current:
+        fut = queue.popleft()
+        if fut.done():
+            continue
+        fut.set_result((key, current.pop(0)))
+    if queue is not None and not queue:
+        waiters.pop(key, None)
+    if current is not None and not current:
+        store.pop(key, None)
+        expires.pop(key, None)
 
 def RESP_bulk_string(string: str) -> bytes:
     return f"${len(string)}\r\n{string}\r\n".encode('utf-8')
@@ -162,7 +179,9 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                                     current = []
                                     store[key] = current
                                 current.extend(values)
-                                writer.write(RESP_integer(len(current)))
+                                length = len(current)
+                                serve_waiters(key)
+                                writer.write(RESP_integer(length))
                     case 'LPUSH':
                         if len(args) < 2:
                             writer.write(RESP_error("wrong number of arguments for 'lpush' command"))
@@ -177,7 +196,9 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                                     store[key] = current
                                 values.reverse()
                                 current[0:0] = values
-                                writer.write(RESP_integer(len(current)))
+                                length = len(current)
+                                serve_waiters(key)
+                                writer.write(RESP_integer(length))
                     case 'LLEN':
                         if len(args) != 1:
                             writer.write(RESP_error("wrong number of arguments for 'llen' command"))
@@ -253,6 +274,103 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                                         writer.write(RESP_array([]))
                                     else:
                                         writer.write(RESP_array(current[ start : stop + 1 ]))
+                    case 'BLPOP':
+                        if len(args) < 2:
+                            writer.write(RESP_error("wrong number of arguments for 'blpop' command"))
+                        else:
+                            keys = args[:-1]
+                            bad = None
+                            try:
+                                timeout = float(args[-1])
+                            except ValueError:
+                                bad = "timeout is not a float or out of range"
+                            else:
+                                if timeout < 0:
+                                    bad = "timeout is negative"
+                            if bad:
+                                writer.write(RESP_error(bad))
+                            else:
+                                # Serve straight away if any key already has elements
+                                reply = None
+                                for key in keys:
+                                    current = lookup(key)
+                                    if current is not None and not isinstance(current, list):
+                                        reply = RESP_list_error("Operation against a key holding the wrong kind of value")
+                                        break
+                                    if current:
+                                        popped = current.pop(0)
+                                        if not current:
+                                            store.pop(key, None)
+                                            expires.pop(key, None)
+                                        reply = RESP_array([key, popped])
+                                        break
+
+                                # Otherwise block until a push hands us an element, or time out
+                                if reply is None:
+                                    loop = asyncio.get_running_loop()
+                                    fut = loop.create_future()
+                                    for key in keys:
+                                        waiters.setdefault(key, deque()).append(fut)
+                                    deadline = loop.time() + timeout if timeout else None
+                                    disconnected = False
+                                    read_task = None
+                                    try:
+                                        # Keep reading while blocked so a disconnect is noticed.
+                                        # Anything the client pipelines meanwhile waits in buffer.
+                                        while not fut.done() and not disconnected:
+                                            remaining = None if deadline is None else deadline - loop.time()
+                                            if remaining is not None and remaining <= 0:
+                                                break
+                                            read_task = asyncio.ensure_future(reader.read(1024))
+                                            await asyncio.wait({fut, read_task}, timeout=remaining,
+                                                               return_when=asyncio.FIRST_COMPLETED)
+                                            if read_task.done():
+                                                try:
+                                                    data = read_task.result()
+                                                except ConnectionError:
+                                                    data = b""
+                                                if data:
+                                                    buffer += data
+                                                else:
+                                                    disconnected = True
+                                            else:
+                                                # Must finish cancelling before anyone calls read() again
+                                                read_task.cancel()
+                                                try:
+                                                    await read_task
+                                                except asyncio.CancelledError:
+                                                    pass
+                                    finally:
+                                        if read_task is not None and not read_task.done():
+                                            read_task.cancel()
+                                        if not fut.done():
+                                            fut.cancel()
+                                        for key in keys:
+                                            queue = waiters.get(key)
+                                            if queue and fut in queue:
+                                                queue.remove(fut)
+                                                if not queue:
+                                                    waiters.pop(key, None)
+
+                                    if disconnected:
+                                        # A push may have handed us an element just as the client
+                                        # left; put it back at the head so it isn't lost.
+                                        if not fut.cancelled():
+                                            key, popped = fut.result()
+                                            current = lookup(key)
+                                            if current is None:
+                                                current = []
+                                                store[key] = current
+                                            current.insert(0, popped)
+                                            serve_waiters(key)
+                                        return
+
+                                    if fut.cancelled():
+                                        reply = NULL_ARRAY
+                                    else:
+                                        key, popped = fut.result()
+                                        reply = RESP_array([key, popped])
+                                writer.write(reply)
                     case _:
                         writer.write(RESP_error(f"unknown command '{tokens[0]}'"))
 
