@@ -143,10 +143,12 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                             writer.write(RESP_error("wrong number of arguments for 'get' command"))
                         else:
                             value = lookup(args[0])
-                            if value is not None:
-                                writer.write(RESP_bulk_string(value))
-                            else:
+                            if value is None:
                                 writer.write(NULL_BULK)
+                            elif not isinstance(value, str):
+                                writer.write(RESP_list_error("Operation against a key holding the wrong kind of value"))
+                            else:
+                                writer.write(RESP_bulk_string(value))
                     case 'RPUSH':
                         if len(args) < 2:
                             writer.write(RESP_error("wrong number of arguments for 'rpush' command"))
