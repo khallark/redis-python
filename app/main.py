@@ -18,6 +18,16 @@ def lookup(key: str):
         expires.pop(key, None)
     return store.get(key)
 
+def type_name(value) -> str:
+    """The name TYPE reports for a stored value (None meaning no key)."""
+    if value is None:
+        return "none"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, list):
+        return "list"
+    raise TypeError(f"unexpected value type {type(value).__name__}")
+
 def serve_waiters(key: str) -> None:
     """Hand elements from key's list to blocked BLPOP clients, oldest first."""
     queue = waiters.get(key)
@@ -371,6 +381,11 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                                         key, popped = fut.result()
                                         reply = RESP_array([key, popped])
                                 writer.write(reply)
+                    case 'TYPE':
+                        if len(args) != 1:
+                            writer.write(RESP_error("wrong number of arguments for 'type' command"))
+                        else:
+                            writer.write(f"+{type_name(lookup(args[0]))}\r\n".encode('utf-8'))
                     case _:
                         writer.write(RESP_error(f"unknown command '{tokens[0]}'"))
 
