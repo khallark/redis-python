@@ -392,7 +392,11 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                 await writer.drain()
     finally:
         writer.close()
-        await writer.wait_closed()
+        try:
+            await writer.wait_closed()
+        except ConnectionError:
+            # The client hung up before our last reply was flushed
+            pass
 
 async def main():
     server = await asyncio.start_server(handle_client, "localhost", 6379)
